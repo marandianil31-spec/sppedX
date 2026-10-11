@@ -12,8 +12,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> {
   static const Color background = Color(0xFF0B111B);
   static const Color cardColor = Color(0xFF18212F);
   static const Color accent = Color(0xFF35D9FF);
@@ -32,8 +31,6 @@ class _HomeScreenState extends State<HomeScreen>
 
   Position? _lastPosition;
   DateTime? _lastPositionTime;
-
-  DateTime? _tripStartTime;
 
   final List<double> _speedSamples = [];
 
@@ -83,11 +80,11 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       await _positionSubscription?.cancel();
-      _speedSamples.clear();
+      _displayTimer?.cancel();
 
+      _speedSamples.clear();
       _lastPosition = null;
       _lastPositionTime = null;
-      _tripStartTime = DateTime.now();
 
       if (!mounted) return;
 
@@ -101,17 +98,20 @@ class _HomeScreenState extends State<HomeScreen>
         gpsStatus = 'Searching for GPS...';
       });
 
-      // Smoothly move the displayed number toward GPS speed.
-      _displayTimer?.cancel();
+      // IMPORTANT: AndroidSettings is not const.
+      final settings = AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        intervalDuration: const Duration(milliseconds: 500),
+        forceLocationManager: false,
+      );
+
       _displayTimer = Timer.periodic(
         const Duration(milliseconds: 50),
         (_) {
           if (!mounted || !isTracking) return;
 
           final difference = targetSpeed - currentSpeed;
-
-          // Faster response when accelerating, slightly
-          // smoother response when slowing down.
           final factor = difference >= 0 ? 0.24 : 0.18;
 
           double nextSpeed =
@@ -125,13 +125,6 @@ class _HomeScreenState extends State<HomeScreen>
             currentSpeed = nextSpeed;
           });
         },
-      );
-
-      const settings = AndroidSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 0,
-        intervalDuration: Duration(milliseconds: 500),
-        forceLocationManager: false,
       );
 
       _positionSubscription =
@@ -165,6 +158,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     final now = DateTime.now();
 
+    // Ignore poor-quality location readings.
     if (!position.accuracy.isFinite ||
         position.accuracy <= 0 ||
         position.accuracy > 25) {
@@ -206,23 +200,24 @@ class _HomeScreenState extends State<HomeScreen>
 
       final calculatedSpeed = meters / elapsed * 3.6;
 
-      // Ignore implausible GPS jumps.
+      // Reject implausible GPS jumps.
       if (meters > 150 || calculatedSpeed > 220) {
         gpsStatus = 'GPS Signal Unstable';
         return;
       }
 
-      // Suppress tiny stationary GPS movements.
+      // Reduce false movement while nearly stationary.
       if (meters < 1.5 && rawSpeed < 3) {
         measuredSpeed = 0;
       }
 
+      // Accumulate distance only for plausible movement.
       if (meters >= 2 && meters <= 100) {
         addedDistance = meters / 1000.0;
       }
 
-      // Use distance-based speed only when the GPS speed
-      // looks inconsistent and location accuracy is poorer.
+      // Avoid replacing GPS speed with unreliable
+      // distance-derived speed when GPS accuracy is poor.
       if (meters >= 2 &&
           elapsed >= 0.5 &&
           (rawSpeed - calculatedSpeed).abs() > 35 &&
@@ -241,10 +236,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     final sorted = List<double>.from(_speedSamples)..sort();
-
-    final median = sorted[sorted.length ~/ 2];
-
-    targetSpeed = median;
+    targetSpeed = sorted[sorted.length ~/ 2];
 
     if (targetSpeed > maxSpeed) {
       maxSpeed = targetSpeed;
@@ -370,26 +362,16 @@ class _HomeScreenState extends State<HomeScreen>
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       const SizedBox(height: 35),
-                      TweenAnimationBuilder<double>(
-                        tween: Tween<double>(
-                          begin: 0,
-                          end: currentSpeed,
+                      Text(
+                        currentSpeed.toStringAsFixed(0),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 68,
+                          fontWeight: FontWeight.bold,
+                          fontFeatures: [
+                            FontFeature.tabularFigures(),
+                          ],
                         ),
-                        duration: const Duration(milliseconds: 80),
-                        curve: Curves.linear,
-                        builder: (context, value, child) {
-                          return Text(
-                            value.toStringAsFixed(0),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 68,
-                              fontWeight: FontWeight.bold,
-                              fontFeatures: [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          );
-                        },
                       ),
                       const Text(
                         'km/h',
