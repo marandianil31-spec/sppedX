@@ -12,211 +12,366 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  StreamSubscription<Position>? _gpsSubscription;
+  static const Color background = Color(0xFF0B111B);
+  static const Color cardColor = Color(0xFF18212F);
+  static const Color accent = Color(0xFF35D9FF);
 
-  double speed = 0;
-  double maxSpeed = 0;
-  double distance = 0;
-
-  Position? previousPosition;
+  StreamSubscription<Position>? _positionSubscription;
 
   bool isTracking = false;
-  String gpsStatus = 'GPS ready';
+  bool isLoading = false;
+
+  double currentSpeed = 0;
+  double maxSpeed = 0;
+  double totalDistance = 0;
+  double gpsAccuracy = 0;
+
+  Position? _lastPosition;
+  DateTime? _lastUpdate;
+  final List<double> _speedSamples = [];
+
+  String gpsStatus = 'GPS Ready';
+
+  @override
+  void dispose() {
+    _positionSubscription?.cancel();
+    super.dispose();
+  }
 
   Future<void> startTrip() async {
+    if (isLoading || isTracking) return;
+
+    setState(() {
+      isLoading = true;
+      gpsStatus = 'Checking GPS...';
+    });
+
     try {
-      final enabled =
+      final serviceEnabled =
           await Geolocator.isLocationServiceEnabled();
 
-      if (!enabled) {
-        setState(() => gpsStatus = 'Please turn GPS on');
+      if (!serviceEnabled) {
+        _showMessage('Phone ki Location/GPS ON karein.');
         return;
       }
 
-      var permission = await Geolocator.checkPermission();
+      LocationPermission permission =
+          await Geolocator.checkPermission();
 
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
 
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        setState(() => gpsStatus = 'Location permission required');
+      if (permission == LocationPermission.denied) {
+        _showMessage('GPS permission allow karein.');
         return;
       }
 
+      if (permission == LocationPermission.deniedForever) {
+        _showMessage(
+          'Settings mein jaakar SpeedX ko Location permission dein.',
+        );
+        return;
+      }
+
+      _lastPosition = null;
+      _lastUpdate = null;
+      _speedSamples.clear();
+
+      if (!mounted) return;
+
       setState(() {
-        speed = 0;
+        currentSpeed = 0;
         maxSpeed = 0;
-        distance = 0;
-        previousPosition = null;
+        totalDistance = 0;
+        gpsAccuracy = 0;
         isTracking = true;
-        gpsStatus = 'Connecting GPS...';
+        gpsStatus = 'Searching for GPS...';
       });
 
-      await _gpsSubscription?.cancel();
+      const settings = AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        intervalDuration: Duration(seconds: 1),
+        forceLocationManager: false,
+      );
 
-      _gpsSubscription = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.best,
-          distanceFilter: 1,
-        ),
+      _positionSubscription =
+          Geolocator.getPositionStream(
+        locationSettings: settings,
       ).listen(
-        (Position position) {
-          if (!mounted || !isTracking) return;
-
-          final currentSpeed = math.max(
-            0.0,
-            position.speed * 3.6,
-          );
+        _onPosition,
+        onError: (Object error) {
+          if (!mounted) return;
 
           setState(() {
-            speed = currentSpeed;
-
-            if (speed > maxSpeed) {
-              maxSpeed = speed;
-            }
-
-            final previous = previousPosition;
-
-            if (previous != null) {
-              final metres = Geolocator.distanceBetween(
-                previous.latitude,
-                previous.longitude,
-                position.latitude,
-                position.longitude,
-              );
-
-              if (metres >= 2 && metres < 100) {
-                distance += metres / 1000;
-              }
-            }
-
-            previousPosition = position;
-            gpsStatus = 'GPS connected';
+            gpsStatus = 'GPS Error';
           });
-        },
-        onError: (_) {
-          if (mounted) {
-            setState(() {
-              gpsStatus = 'GPS signal unavailable';
-            });
-          }
+
+          _showMessage('GPS update nahi mil raha hai.');
         },
       );
-    } catch (_) {
+    } catch (e) {
+      _showMessage('GPS start nahi hua. Dobara try karein.');
+    } finally {
       if (mounted) {
-        setState(() => gpsStatus = 'GPS error');
+        setState(() {
+          isLoading = false;
+        });
       }
     }
   }
 
+  void _onPosition(Position position) {
+    if (!mounted || !isTracking) return;
+
+    final now = DateTime.now();
+
+    // Reject inaccurate GPS positions.
+    if (!position.accuracy.isFinite ||
+        position.accuracy <= 0 ||
+        position.accuracy > 25) {
+      setState(() {
+        gpsAccuracy = position.accuracy;
+        gpsStatus = 'Weak GPS Signal';
+      });
+      return;
+    }
+
+    gpsAccuracy = position.accuracy;
+
+    final rawSpeed = position.speed.isFinite
+        ? math.max(0.0, position.speed * 3.6)
+        : 0.0;
+
+    final previous = _lastPosition;
+    final previousTime = _lastUpdate;
+
+    double measuredSpeed = rawSpeed;
+    double addedDistance = 0;
+
+    if (previous != null && previousTime != null) {
+      final elapsed = now.difference(previousTime).inMilliseconds /
+          1000.0;
+
+      if (elapsed <= 0 || elapsed > 10) {
+        _lastPosition = position;
+        _lastUpdate = now;
+        return;
+      }
+
+      final meters = Geolocator.distanceBetween(
+        previous.latitude,
+        previous.longitude,
+        position.latitude,
+        position.longitude,
+      );
+
+      // GPS jumps can create unrealistic speeds.
+      final calculatedSpeed = meters / elapsed * 3.6;
+
+      if (meters > 150 || calculatedSpeed > 220) {
+        gpsStatus = 'GPS Signal Unstable';
+        return;
+      }
+
+      // Ignore tiny movements while stationary.
+      if (meters < 1.5 && rawSpeed < 3) {
+        measuredSpeed = 0;
+      }
+
+      // Do not count very small GPS movements as distance.
+      if (meters >= 2 && meters <= 100) {
+        addedDistance = meters / 1000.0;
+      }
+
+      // Compare GPS speed with distance-based speed.
+      // If they differ greatly, trust GPS speed cautiously.
+      if (meters >= 2 && elapsed >= 0.5) {
+        final difference = (rawSpeed - calculatedSpeed).abs();
+
+        if (difference > 35 && position.accuracy > 10) {
+          measuredSpeed = calculatedSpeed;
+        }
+      }
+
+      _lastPosition = position;
+      _lastUpdate = now;
+    } else {
+      _lastPosition = position;
+      _lastUpdate = now;
+    }
+
+    // Smooth speed using recent readings.
+    _speedSamples.add(measuredSpeed);
+
+    if (_speedSamples.length > 5) {
+      _speedSamples.removeAt(0);
+    }
+
+    final sortedSamples = List<double>.from(_speedSamples)
+      ..sort();
+
+    final median = sortedSamples[sortedSamples.length ~/ 2];
+
+    // Limit sudden jumps between consecutive display readings.
+    double smoothedSpeed = median;
+
+    final difference = smoothedSpeed - currentSpeed;
+
+    if (difference > 15) {
+      smoothedSpeed = currentSpeed + 15;
+    } else if (difference < -20) {
+      smoothedSpeed = currentSpeed - 20;
+    }
+
+    // Do not report a false stationary speed.
+    if (rawSpeed < 1.0 &&
+        position.accuracy <= 10 &&
+        currentSpeed < 4) {
+      smoothedSpeed = 0;
+    }
+
+    smoothedSpeed = math.max(0, smoothedSpeed);
+
+    setState(() {
+      currentSpeed = smoothedSpeed;
+
+      if (currentSpeed > maxSpeed) {
+        maxSpeed = currentSpeed;
+      }
+
+      totalDistance += addedDistance;
+
+      gpsStatus = position.accuracy <= 10
+          ? 'GPS Signal: Good'
+          : 'GPS Signal: Fair';
+    });
+  }
+
   Future<void> stopTrip() async {
-    await _gpsSubscription?.cancel();
-    _gpsSubscription = null;
+    await _positionSubscription?.cancel();
+    _positionSubscription = null;
 
     if (!mounted) return;
 
     setState(() {
       isTracking = false;
-      speed = 0;
-      gpsStatus = 'Trip stopped';
+      currentSpeed = 0;
+      gpsStatus = 'Trip Stopped';
+      _lastPosition = null;
+      _lastUpdate = null;
+      _speedSamples.clear();
     });
+
+    _showMessage(
+      'Trip stopped. Distance: ${totalDistance.toStringAsFixed(2)} km',
+    );
   }
 
-  @override
-  void dispose() {
-    _gpsSubscription?.cancel();
-    super.dispose();
+  void _showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
+
+  String get speedText => currentSpeed.toStringAsFixed(0);
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  const Icon(
-                    Icons.speed,
-                    color: Color(0xFF00F5A0),
-                    size: 38,
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'SpeedX',
-                          style: TextStyle(
-                            fontSize: 27,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text(
-                          'GPS SPEEDOMETER',
-                          style: TextStyle(
-                            color: Colors.white54,
-                            fontSize: 10,
-                            letterSpacing: 2,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Icon(
-                    Icons.gps_fixed,
-                    color: Color(0xFF00F5A0),
-                  ),
-                ],
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        foregroundColor: Colors.white,
+        title: const Row(
+          children: [
+            Icon(Icons.speed, color: accent, size: 30),
+            SizedBox(width: 10),
+            Text(
+              'SpeedX',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1,
               ),
-
-              const SizedBox(height: 25),
-
-              Text(
-                gpsStatus,
-                style: const TextStyle(
-                  color: Color(0xFF00F5A0),
-                  fontSize: 13,
+            ),
+          ],
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: isTracking
+                      ? Colors.green.withValues(alpha: 0.15)
+                      : Colors.white10,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  isTracking ? 'LIVE GPS' : 'GPS OFF',
+                  style: TextStyle(
+                    color: isTracking ? Colors.greenAccent : Colors.white54,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(18),
+          children: [
+            const SizedBox(height: 10),
 
-              const SizedBox(height: 15),
+            Center(
+              child: Text(
+                'CURRENT SPEED',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6),
+                  fontSize: 13,
+                  letterSpacing: 3,
+                ),
+              ),
+            ),
 
-              SizedBox(
-                width: 290,
-                height: 290,
+            const SizedBox(height: 24),
+
+            Center(
+              child: SizedBox(
+                width: 280,
+                height: 280,
                 child: CustomPaint(
-                  painter: SpeedGaugePainter(speed: speed),
+                  painter: SpeedGaugePainter(
+                    speed: currentSpeed,
+                    maxSpeed: 220,
+                  ),
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       const SizedBox(height: 35),
                       Text(
-                        speed.round().toString(),
+                        speedText,
                         style: const TextStyle(
-                          fontSize: 76,
-                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                          fontSize: 68,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                       const Text(
                         'km/h',
                         style: TextStyle(
-                          color: Color(0xFF00F5A0),
+                          color: accent,
                           fontSize: 18,
-                          letterSpacing: 3,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'LIVE SPEED',
-                        style: TextStyle(
-                          color: Colors.white54,
-                          fontSize: 11,
                           letterSpacing: 2,
                         ),
                       ),
@@ -224,115 +379,177 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
+            ),
 
-              const SizedBox(height: 25),
+            const SizedBox(height: 20),
 
-              Row(
+            Center(
+              child: Text(
+                gpsStatus,
+                style: const TextStyle(
+                  color: accent,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 28),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _infoCard(
+                    icon: Icons.speed,
+                    title: 'MAX SPEED',
+                    value: maxSpeed.toStringAsFixed(1),
+                    unit: 'km/h',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _infoCard(
+                    icon: Icons.route,
+                    title: 'DISTANCE',
+                    value: totalDistance.toStringAsFixed(2),
+                    unit: 'km',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 12),
+
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: cardColor,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
                 children: [
-                  Expanded(
-                    child: _statCard(
-                      'MAX SPEED',
-                      maxSpeed.round().toString(),
-                      'km/h',
-                      Icons.trending_up,
-                    ),
+                  const Icon(
+                    Icons.gps_fixed,
+                    color: accent,
                   ),
                   const SizedBox(width: 12),
-                  Expanded(
-                    child: _statCard(
-                      'DISTANCE',
-                      distance.toStringAsFixed(2),
-                      'km',
-                      Icons.route,
+                  const Expanded(
+                    child: Text(
+                      'GPS Accuracy',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ),
+                  Text(
+                    gpsAccuracy > 0
+                        ? '${gpsAccuracy.toStringAsFixed(1)} m'
+                        : '--',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                 ],
               ),
+            ),
 
-              const SizedBox(height: 25),
+            const SizedBox(height: 24),
 
-              SizedBox(
-                width: double.infinity,
-                height: 58,
-                child: ElevatedButton.icon(
-                  onPressed: isTracking ? stopTrip : startTrip,
-                  icon: Icon(
-                    isTracking ? Icons.stop : Icons.play_arrow,
+            SizedBox(
+              height: 58,
+              child: ElevatedButton.icon(
+                onPressed: isLoading
+                    ? null
+                    : isTracking
+                        ? stopTrip
+                        : startTrip,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor:
+                      isTracking ? Colors.redAccent : accent,
+                  foregroundColor:
+                      isTracking ? Colors.white : background,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
                   ),
-                  label: Text(
-                    isTracking ? 'STOP TRIP' : 'START TRIP',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isTracking
-                        ? Colors.redAccent
-                        : const Color(0xFF00F5A0),
-                    foregroundColor: const Color(0xFF080D14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(18),
-                    ),
+                ),
+                icon: isLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : Icon(
+                        isTracking ? Icons.stop : Icons.play_arrow,
+                      ),
+                label: Text(
+                  isLoading
+                      ? 'STARTING GPS...'
+                      : isTracking
+                          ? 'STOP TRIP'
+                          : 'START TRIP',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
+            ),
 
-              const SizedBox(height: 16),
+            const SizedBox(height: 18),
 
-              const Text(
-                'GPS accuracy depends on signal and phone quality.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                ),
+            const Text(
+              'For better GPS results, test outdoors with a clear view of the sky.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 11,
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _statCard(
-    String title,
-    String value,
-    String unit,
-    IconData icon,
-  ) {
+  Widget _infoCard({
+    required IconData icon,
+    required String title,
+    required String value,
+    required String unit,
+  }) {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: const Color(0xFF111A25),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: const Color(0xFF00F5A0)),
-          const SizedBox(height: 12),
+          Icon(icon, color: accent, size: 25),
+          const SizedBox(height: 16),
           Text(
             title,
             style: const TextStyle(
               color: Colors.white54,
               fontSize: 10,
+              letterSpacing: 1,
             ),
           ),
-          const SizedBox(height: 7),
+          const SizedBox(height: 8),
           Text(
             value,
             style: const TextStyle(
-              fontSize: 25,
+              color: Colors.white,
+              fontSize: 26,
               fontWeight: FontWeight.bold,
             ),
           ),
           Text(
             unit,
             style: const TextStyle(
-              color: Color(0xFF00F5A0),
-              fontSize: 11,
+              color: accent,
+              fontSize: 12,
             ),
           ),
         ],
@@ -343,33 +560,37 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class SpeedGaugePainter extends CustomPainter {
   final double speed;
+  final double maxSpeed;
 
-  SpeedGaugePainter({required this.speed});
+  SpeedGaugePainter({
+    required this.speed,
+    required this.maxSpeed,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width * 0.42;
+    final radius = math.min(size.width, size.height) / 2 - 18;
 
     const startAngle = math.pi * 0.75;
     const sweepAngle = math.pi * 1.5;
+
+    final backgroundPaint = Paint()
+      ..color = const Color(0xFF263344)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 15
+      ..strokeCap = StrokeCap.round;
+
+    final activePaint = Paint()
+      ..color = const Color(0xFF35D9FF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 15
+      ..strokeCap = StrokeCap.round;
 
     final rect = Rect.fromCircle(
       center: center,
       radius: radius,
     );
-
-    final backgroundPaint = Paint()
-      ..color = const Color(0xFF24303E)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 12
-      ..strokeCap = StrokeCap.round;
-
-    final activePaint = Paint()
-      ..color = const Color(0xFF00F5A0)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 12
-      ..strokeCap = StrokeCap.round;
 
     canvas.drawArc(
       rect,
@@ -379,24 +600,22 @@ class SpeedGaugePainter extends CustomPainter {
       backgroundPaint,
     );
 
-    final progress = (speed / 180).clamp(0.0, 1.0);
+    final progress = (speed / maxSpeed).clamp(0.0, 1.0);
 
-    if (progress > 0) {
-      canvas.drawArc(
-        rect,
-        startAngle,
-        sweepAngle * progress,
-        false,
-        activePaint,
-      );
-    }
+    canvas.drawArc(
+      rect,
+      startAngle,
+      sweepAngle * progress,
+      false,
+      activePaint,
+    );
 
     final tickPaint = Paint()
-      ..color = Colors.white30
+      ..color = Colors.white24
       ..strokeWidth = 2;
 
-    for (int i = 0; i <= 18; i++) {
-      final angle = startAngle + sweepAngle * i / 18;
+    for (int i = 0; i <= 22; i++) {
+      final angle = startAngle + sweepAngle * i / 22;
 
       final outer = Offset(
         center.dx + math.cos(angle) * (radius - 18),
@@ -414,6 +633,7 @@ class SpeedGaugePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant SpeedGaugePainter oldDelegate) {
-    return oldDelegate.speed != speed;
+    return oldDelegate.speed != speed ||
+        oldDelegate.maxSpeed != maxSpeed;
   }
 }
