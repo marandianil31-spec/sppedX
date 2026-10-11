@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -11,23 +12,29 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   static const Color background = Color(0xFF0B111B);
   static const Color cardColor = Color(0xFF18212F);
   static const Color accent = Color(0xFF35D9FF);
 
   StreamSubscription<Position>? _positionSubscription;
+  Timer? _displayTimer;
 
   bool isTracking = false;
   bool isLoading = false;
 
   double currentSpeed = 0;
+  double targetSpeed = 0;
   double maxSpeed = 0;
   double totalDistance = 0;
   double gpsAccuracy = 0;
 
   Position? _lastPosition;
-  DateTime? _lastUpdate;
+  DateTime? _lastPositionTime;
+
+  DateTime? _tripStartTime;
+
   final List<double> _speedSamples = [];
 
   String gpsStatus = 'GPS Ready';
@@ -35,6 +42,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _positionSubscription?.cancel();
+    _displayTimer?.cancel();
     super.dispose();
   }
 
@@ -51,7 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
           await Geolocator.isLocationServiceEnabled();
 
       if (!serviceEnabled) {
-        _showMessage('Phone ki Location/GPS ON karein.');
+        _showMessage('Please turn on phone Location/GPS.');
         return;
       }
 
@@ -63,25 +71,29 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       if (permission == LocationPermission.denied) {
-        _showMessage('GPS permission allow karein.');
+        _showMessage('Please allow location permission.');
         return;
       }
 
       if (permission == LocationPermission.deniedForever) {
         _showMessage(
-          'Settings mein jaakar SpeedX ko Location permission dein.',
+          'Open phone Settings and allow SpeedX location permission.',
         );
         return;
       }
 
-      _lastPosition = null;
-      _lastUpdate = null;
+      await _positionSubscription?.cancel();
       _speedSamples.clear();
+
+      _lastPosition = null;
+      _lastPositionTime = null;
+      _tripStartTime = DateTime.now();
 
       if (!mounted) return;
 
       setState(() {
         currentSpeed = 0;
+        targetSpeed = 0;
         maxSpeed = 0;
         totalDistance = 0;
         gpsAccuracy = 0;
@@ -89,10 +101,36 @@ class _HomeScreenState extends State<HomeScreen> {
         gpsStatus = 'Searching for GPS...';
       });
 
+      // Smoothly move the displayed number toward GPS speed.
+      _displayTimer?.cancel();
+      _displayTimer = Timer.periodic(
+        const Duration(milliseconds: 50),
+        (_) {
+          if (!mounted || !isTracking) return;
+
+          final difference = targetSpeed - currentSpeed;
+
+          // Faster response when accelerating, slightly
+          // smoother response when slowing down.
+          final factor = difference >= 0 ? 0.24 : 0.18;
+
+          double nextSpeed =
+              currentSpeed + difference * factor;
+
+          if (nextSpeed < 0.4 && targetSpeed < 0.4) {
+            nextSpeed = 0;
+          }
+
+          setState(() {
+            currentSpeed = nextSpeed;
+          });
+        },
+      );
+
       const settings = AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
-        intervalDuration: Duration(seconds: 1),
+        intervalDuration: Duration(milliseconds: 500),
         forceLocationManager: false,
       );
 
@@ -108,11 +146,11 @@ class _HomeScreenState extends State<HomeScreen> {
             gpsStatus = 'GPS Error';
           });
 
-          _showMessage('GPS update nahi mil raha hai.');
+          _showMessage('GPS update failed. Please try again.');
         },
       );
     } catch (e) {
-      _showMessage('GPS start nahi hua. Dobara try karein.');
+      _showMessage('Unable to start GPS. Please try again.');
     } finally {
       if (mounted) {
         setState(() {
@@ -127,7 +165,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final now = DateTime.now();
 
-    // Reject inaccurate GPS positions.
     if (!position.accuracy.isFinite ||
         position.accuracy <= 0 ||
         position.accuracy > 25) {
@@ -145,18 +182,18 @@ class _HomeScreenState extends State<HomeScreen> {
         : 0.0;
 
     final previous = _lastPosition;
-    final previousTime = _lastUpdate;
+    final previousTime = _lastPositionTime;
 
     double measuredSpeed = rawSpeed;
     double addedDistance = 0;
 
     if (previous != null && previousTime != null) {
-      final elapsed = now.difference(previousTime).inMilliseconds /
-          1000.0;
+      final elapsed =
+          now.difference(previousTime).inMilliseconds / 1000.0;
 
       if (elapsed <= 0 || elapsed > 10) {
         _lastPosition = position;
-        _lastUpdate = now;
+        _lastPositionTime = now;
         return;
       }
 
@@ -167,82 +204,55 @@ class _HomeScreenState extends State<HomeScreen> {
         position.longitude,
       );
 
-      // GPS jumps can create unrealistic speeds.
       final calculatedSpeed = meters / elapsed * 3.6;
 
+      // Ignore implausible GPS jumps.
       if (meters > 150 || calculatedSpeed > 220) {
         gpsStatus = 'GPS Signal Unstable';
         return;
       }
 
-      // Ignore tiny movements while stationary.
+      // Suppress tiny stationary GPS movements.
       if (meters < 1.5 && rawSpeed < 3) {
         measuredSpeed = 0;
       }
 
-      // Do not count very small GPS movements as distance.
       if (meters >= 2 && meters <= 100) {
         addedDistance = meters / 1000.0;
       }
 
-      // Compare GPS speed with distance-based speed.
-      // If they differ greatly, trust GPS speed cautiously.
-      if (meters >= 2 && elapsed >= 0.5) {
-        final difference = (rawSpeed - calculatedSpeed).abs();
-
-        if (difference > 35 && position.accuracy > 10) {
-          measuredSpeed = calculatedSpeed;
-        }
+      // Use distance-based speed only when the GPS speed
+      // looks inconsistent and location accuracy is poorer.
+      if (meters >= 2 &&
+          elapsed >= 0.5 &&
+          (rawSpeed - calculatedSpeed).abs() > 35 &&
+          position.accuracy > 10) {
+        measuredSpeed = calculatedSpeed;
       }
-
-      _lastPosition = position;
-      _lastUpdate = now;
-    } else {
-      _lastPosition = position;
-      _lastUpdate = now;
     }
 
-    // Smooth speed using recent readings.
+    _lastPosition = position;
+    _lastPositionTime = now;
+
     _speedSamples.add(measuredSpeed);
 
     if (_speedSamples.length > 5) {
       _speedSamples.removeAt(0);
     }
 
-    final sortedSamples = List<double>.from(_speedSamples)
-      ..sort();
+    final sorted = List<double>.from(_speedSamples)..sort();
 
-    final median = sortedSamples[sortedSamples.length ~/ 2];
+    final median = sorted[sorted.length ~/ 2];
 
-    // Limit sudden jumps between consecutive display readings.
-    double smoothedSpeed = median;
+    targetSpeed = median;
 
-    final difference = smoothedSpeed - currentSpeed;
-
-    if (difference > 15) {
-      smoothedSpeed = currentSpeed + 15;
-    } else if (difference < -20) {
-      smoothedSpeed = currentSpeed - 20;
+    if (targetSpeed > maxSpeed) {
+      maxSpeed = targetSpeed;
     }
 
-    // Do not report a false stationary speed.
-    if (rawSpeed < 1.0 &&
-        position.accuracy <= 10 &&
-        currentSpeed < 4) {
-      smoothedSpeed = 0;
-    }
-
-    smoothedSpeed = math.max(0, smoothedSpeed);
+    totalDistance += addedDistance;
 
     setState(() {
-      currentSpeed = smoothedSpeed;
-
-      if (currentSpeed > maxSpeed) {
-        maxSpeed = currentSpeed;
-      }
-
-      totalDistance += addedDistance;
-
       gpsStatus = position.accuracy <= 10
           ? 'GPS Signal: Good'
           : 'GPS Signal: Fair';
@@ -253,14 +263,18 @@ class _HomeScreenState extends State<HomeScreen> {
     await _positionSubscription?.cancel();
     _positionSubscription = null;
 
+    _displayTimer?.cancel();
+    _displayTimer = null;
+
     if (!mounted) return;
 
     setState(() {
       isTracking = false;
       currentSpeed = 0;
+      targetSpeed = 0;
       gpsStatus = 'Trip Stopped';
       _lastPosition = null;
-      _lastUpdate = null;
+      _lastPositionTime = null;
       _speedSamples.clear();
     });
 
@@ -276,8 +290,6 @@ class _HomeScreenState extends State<HomeScreen> {
       SnackBar(content: Text(message)),
     );
   }
-
-  String get speedText => currentSpeed.toStringAsFixed(0);
 
   @override
   Widget build(BuildContext context) {
@@ -317,7 +329,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(
                   isTracking ? 'LIVE GPS' : 'GPS OFF',
                   style: TextStyle(
-                    color: isTracking ? Colors.greenAccent : Colors.white54,
+                    color: isTracking
+                        ? Colors.greenAccent
+                        : Colors.white54,
                     fontSize: 10,
                     fontWeight: FontWeight.bold,
                   ),
@@ -332,7 +346,6 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.all(18),
           children: [
             const SizedBox(height: 10),
-
             Center(
               child: Text(
                 'CURRENT SPEED',
@@ -343,9 +356,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 24),
-
             Center(
               child: SizedBox(
                 width: 280,
@@ -359,13 +370,26 @@ class _HomeScreenState extends State<HomeScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       const SizedBox(height: 35),
-                      Text(
-                        speedText,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 68,
-                          fontWeight: FontWeight.bold,
+                      TweenAnimationBuilder<double>(
+                        tween: Tween<double>(
+                          begin: 0,
+                          end: currentSpeed,
                         ),
+                        duration: const Duration(milliseconds: 80),
+                        curve: Curves.linear,
+                        builder: (context, value, child) {
+                          return Text(
+                            value.toStringAsFixed(0),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 68,
+                              fontWeight: FontWeight.bold,
+                              fontFeatures: [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          );
+                        },
                       ),
                       const Text(
                         'km/h',
@@ -380,9 +404,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 20),
-
             Center(
               child: Text(
                 gpsStatus,
@@ -392,9 +414,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 28),
-
             Row(
               children: [
                 Expanded(
@@ -416,9 +436,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ],
             ),
-
             const SizedBox(height: 12),
-
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -427,10 +445,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: Row(
                 children: [
-                  const Icon(
-                    Icons.gps_fixed,
-                    color: accent,
-                  ),
+                  const Icon(Icons.gps_fixed, color: accent),
                   const SizedBox(width: 12),
                   const Expanded(
                     child: Text(
@@ -450,9 +465,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-
             const SizedBox(height: 24),
-
             SizedBox(
               height: 58,
               child: ElevatedButton.icon(
@@ -494,9 +507,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 18),
-
             const Text(
               'For better GPS results, test outdoors with a clear view of the sky.',
               textAlign: TextAlign.center,
