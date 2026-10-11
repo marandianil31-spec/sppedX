@@ -34,21 +34,20 @@ jobs:
 
       - name: Copy SpeedX Code
         run: |
-          cp lib/main.dart build_app/lib/main.dart
+          cp -r lib/. build_app/lib/
 
-      - name: Add Geolocator
+      - name: Add Dependencies
         working-directory: build_app
-        run: flutter pub add geolocator
+        run: |
+          flutter pub add geolocator
+          flutter pub add shared_preferences
 
       - name: Add GPS Permissions
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path(
-              "build_app/android/app/src/main/AndroidManifest.xml"
-          )
-
+          p = Path("build_app/android/app/src/main/AndroidManifest.xml")
           text = p.read_text()
 
           permissions = """
