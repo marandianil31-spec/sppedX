@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'home_screen.dart';
+
+import '../main.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -14,8 +16,8 @@ class _SplashScreenState extends State<SplashScreen>
     with TickerProviderStateMixin {
   late final AnimationController _logoController;
   late final AnimationController _pulseController;
-  late final Animation<double> _logoAnimation;
-  late final Animation<double> _fadeAnimation;
+
+  Timer? _navigationTimer;
 
   @override
   void initState() {
@@ -23,48 +25,34 @@ class _SplashScreenState extends State<SplashScreen>
 
     _logoController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 1200),
     );
 
     _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1800),
-    )..repeat(reverse: true);
-
-    _logoAnimation = CurvedAnimation(
-      parent: _logoController,
-      curve: Curves.easeOutBack,
-    );
-
-    _fadeAnimation = CurvedAnimation(
-      parent: _logoController,
-      curve: Curves.easeIn,
+      duration: const Duration(milliseconds: 1000),
     );
 
     _logoController.forward();
+    _pulseController.repeat(reverse: true);
 
-    Future.delayed(const Duration(milliseconds: 2600), () {
-      if (!mounted) return;
+    _navigationTimer = Timer(
+      const Duration(milliseconds: 2600),
+      () {
+        if (!mounted) return;
 
-      Navigator.of(context).pushReplacement(
-        PageRouteBuilder(
-          pageBuilder: (context, animation, secondaryAnimation) =>
-              const MainNavigation(),
-          transitionsBuilder:
-              (context, animation, secondaryAnimation, child) {
-            return FadeTransition(
-              opacity: animation,
-              child: child,
-            );
-          },
-          transitionDuration: const Duration(milliseconds: 500),
-        ),
-      );
-    });
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute<void>(
+            builder: (_) => const MainNavigation(),
+          ),
+        );
+      },
+    );
   }
 
   @override
   void dispose() {
+    _navigationTimer?.cancel();
     _logoController.dispose();
     _pulseController.dispose();
     super.dispose();
@@ -72,167 +60,102 @@ class _SplashScreenState extends State<SplashScreen>
 
   @override
   Widget build(BuildContext context) {
-    const cyan = Color(0xFF35D9FF);
-    const background = Color(0xFF070C14);
-
     return Scaffold(
-      backgroundColor: background,
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment(0, -0.2),
-            radius: 0.9,
-            colors: [
-              Color(0xFF142D43),
-              background,
-            ],
+      backgroundColor: const Color(0xFF0B111B),
+      body: Center(
+        child: FadeTransition(
+          opacity: CurvedAnimation(
+            parent: _logoController,
+            curve: Curves.easeIn,
           ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: AnimatedBuilder(
-              animation: Listenable.merge([
-                _logoController,
-                _pulseController,
-              ]),
-              builder: (context, child) {
-                return FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: Transform.scale(
-                    scale: _logoAnimation.value,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        SizedBox(
-                          width: 220,
-                          height: 220,
-                          child: Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              Container(
-                                width: 190 +
-                                    (_pulseController.value * 12),
-                                height: 190 +
-                                    (_pulseController.value * 12),
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: cyan.withValues(
-                                      alpha: 0.12 +
-                                          (_pulseController.value * 0.18),
-                                    ),
-                                    width: 2,
-                                  ),
-                                ),
-                              ),
-                              Container(
-                                width: 165,
-                                height: 165,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: const Color(0xFF101D2B),
-                                  border: Border.all(
-                                    color: cyan.withValues(alpha: 0.65),
-                                    width: 3,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: cyan.withValues(
-                                        alpha: 0.12 +
-                                            (_pulseController.value * 0.18),
-                                      ),
-                                      blurRadius: 30,
-                                      spreadRadius: 3,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              CustomPaint(
-                                size: const Size(155, 155),
-                                painter: _SplashGaugePainter(
-                                  progress: _pulseController.value,
-                                ),
-                              ),
-                              const Icon(
-                                Icons.speed_rounded,
-                                size: 83,
-                                color: cyan,
-                              ),
-                              Positioned(
-                                bottom: 35,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: background,
-                                    borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(
-                                      color: cyan.withValues(alpha: 0.5),
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    'GPS',
-                                    style: TextStyle(
-                                      color: cyan,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 3,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
+          child: ScaleTransition(
+            scale: Tween<double>(
+              begin: 0.75,
+              end: 1.0,
+            ).animate(
+              CurvedAnimation(
+                parent: _logoController,
+                curve: Curves.easeOutBack,
+              ),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AnimatedBuilder(
+                  animation: _pulseController,
+                  builder: (context, child) {
+                    return Container(
+                      width: 142 +
+                          (_pulseController.value * 8),
+                      height: 142 +
+                          (_pulseController.value * 8),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: const Color(0xFF35D9FF)
+                              .withValues(
+                            alpha: 0.35 +
+                                (_pulseController.value * 0.4),
                           ),
+                          width: 2,
                         ),
-                        const SizedBox(height: 22),
-                        const Text(
-                          'SpeedX',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 42,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 3,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'YOUR JOURNEY. YOUR SPEED.',
-                          style: TextStyle(
-                            color: cyan,
-                            fontSize: 11,
-                            letterSpacing: 2.2,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 55),
-                        SizedBox(
-                          width: 130,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: LinearProgressIndicator(
-                              value: null,
-                              minHeight: 3,
-                              backgroundColor: Colors.white10,
-                              color: cyan,
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF35D9FF)
+                                .withValues(
+                              alpha: 0.08 +
+                                  (_pulseController.value * 0.12),
                             ),
+                            blurRadius: 30,
+                            spreadRadius: 3,
+                          ),
+                        ],
+                      ),
+                      child: CustomPaint(
+                        painter: _SplashGaugePainter(
+                          progress: _pulseController.value,
+                        ),
+                        child: const Center(
+                          child: Icon(
+                            Icons.speed_rounded,
+                            size: 64,
+                            color: Color(0xFF35D9FF),
                           ),
                         ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'INITIALIZING SPEEDX',
-                          style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 9,
-                            letterSpacing: 2,
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 30),
+                const Text(
+                  'SpeedX',
+                  style: TextStyle(
+                    fontSize: 36,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 3,
+                    color: Colors.white,
                   ),
-                );
-              },
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'YOUR SPEED. YOUR JOURNEY.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    letterSpacing: 2.2,
+                    color: Color(0xFF91A5BB),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 38),
+                const SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Color(0xFF35D9FF),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -244,55 +167,55 @@ class _SplashScreenState extends State<SplashScreen>
 class _SplashGaugePainter extends CustomPainter {
   final double progress;
 
-  _SplashGaugePainter({required this.progress});
+  const _SplashGaugePainter({
+    required this.progress,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 12;
+    final center = Offset(
+      size.width / 2,
+      size.height / 2,
+    );
+
+    final radius = size.width * 0.38;
+
+    final backgroundPaint = Paint()
+      ..color = const Color(0xFF253447)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+
+    final progressPaint = Paint()
+      ..color = const Color(0xFF35D9FF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
 
     const startAngle = math.pi * 0.75;
     const sweepAngle = math.pi * 1.5;
-
-    final paint = Paint()
-      ..color = const Color(0xFF35D9FF)
-          .withValues(alpha: 0.5 + progress * 0.5)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
 
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
       startAngle,
       sweepAngle,
       false,
-      paint,
+      backgroundPaint,
     );
 
-    final needleAngle =
-        startAngle + sweepAngle * (0.15 + progress * 0.7);
-
-    final needlePaint = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
-
-    final needleEnd = Offset(
-      center.dx + math.cos(needleAngle) * (radius - 15),
-      center.dy + math.sin(needleAngle) * (radius - 15),
-    );
-
-    canvas.drawLine(center, needleEnd, needlePaint);
-
-    canvas.drawCircle(
-      center,
-      5,
-      Paint()..color = const Color(0xFF35D9FF),
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      startAngle,
+      sweepAngle * (0.65 + progress * 0.25),
+      false,
+      progressPaint,
     );
   }
 
   @override
-  bool shouldRepaint(covariant _SplashGaugePainter oldDelegate) {
+  bool shouldRepaint(
+    covariant _SplashGaugePainter oldDelegate,
+  ) {
     return oldDelegate.progress != progress;
   }
 }
